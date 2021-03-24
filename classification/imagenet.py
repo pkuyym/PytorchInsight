@@ -57,6 +57,10 @@ parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
 # Optimization options
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
+parser.add_argument('--cos', dest='cos', action='store_true',
+                    help='using cosine decay lr schedule')
+parser.add_argument('--warmup', '--wp', default=5, type=int,
+                    help='number of epochs to warmup')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--train-batch', default=256, type=int, metavar='N',
@@ -144,7 +148,6 @@ def main():
         ])),
         batch_size=args.train_batch, shuffle=True,
         num_workers=args.workers, pin_memory=True)
-
     val_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transforms.Compose([
             transforms.Scale(256),
@@ -198,7 +201,7 @@ def main():
         # model may have more keys
         t = model.state_dict()
         c = checkpoint['state_dict']
-        flag = True 
+        flag = True
         for k in t:
             if k not in c:
                 print('not in loading dict! fill it', k, t[k])
@@ -224,8 +227,6 @@ def main():
 
     # Train and val
     for epoch in range(start_epoch, args.epochs):
-        adjust_learning_rate(optimizer, epoch)
-
         print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
 
         train_loss, train_acc = train(train_loader, model, criterion, optimizer, epoch, use_cuda)
@@ -264,7 +265,9 @@ def train(train_loader, model, criterion, optimizer, epoch, use_cuda):
 
     bar = Bar('Processing', max=len(train_loader))
     show_step = len(train_loader) // 10
+    steps_per_epoch = len(train_loader)
     for batch_idx, (inputs, targets) in enumerate(train_loader):
+        adjust_learning_rate(optimizer, batch_idx, steps_per_epoch, epoch)
         batch_size = inputs.size(0)
         if batch_size < args.train_batch:
             continue
@@ -375,12 +378,26 @@ def save_checkpoint(state, is_best, checkpoint='checkpoint', filename='checkpoin
     if is_best:
         shutil.copyfile(filepath, os.path.join(checkpoint, 'model_best.pth.tar'))
 
-def adjust_learning_rate(optimizer, epoch):
+def adjust_learning_rate(optimizer, step, steps_per_epoch, epoch):
     global state
-    if epoch in args.schedule:
-        state['lr'] *= args.gamma
+
+    def adjust_optimizer():
         for param_group in optimizer.param_groups:
             param_group['lr'] = state['lr']
+
+    if epoch < args.warmup:
+        warmup_steps = steps_per_epoch * args.warmup
+        state['lr'] = args.lr * (epoch * steps_per_epoch + step) / warmup_steps
+        adjust_optimizer()
+
+    elif args.cos: # cosine decay lr schedule (Note: epoch-wise, not batch-wise)
+        state['lr'] = args.lr * 0.5 * (1 + np.cos(np.pi * epoch / args.epochs))
+        adjust_optimizer()
+
+    elif epoch in args.schedule: # step lr schedule
+        state['lr'] *= args.gamma
+        adjust_optimizer()
+
 
 if __name__ == '__main__':
     main()

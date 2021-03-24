@@ -1,12 +1,12 @@
 from .common_head import *
 
-__all__ = ['aa_resnet34', 'aa_resnet50', 'aa_resnet101', 'aa_resnet152']
+__all__ = ['ea_resnet34', 'ea_resnet50', 'ea_resnet101', 'ea_resnet152']
 
 
-class AugmentedConv(nn.Module):
+class EAAugmentedConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride,
-                 k, v, Nh, shape, att_downsample, relative=True):
-        super(AugmentedConv, self).__init__()
+                 k, v, Nh, shape, att_downsample, alpha=1.0, beta=0.5, relative=True):
+        super(EAAugmentedConv, self).__init__()
         self.dk = int(out_channels * k)
         self.dv = int(out_channels * v)
         self.Nh = Nh
@@ -17,6 +17,8 @@ class AugmentedConv(nn.Module):
         self.kernel_size = kernel_size
         self.stride = stride
         self.att_downsample = att_downsample
+        self.alpha = alpha
+        self.beta = beta
         self.relative = relative
 
         self.conv_out = nn.Conv2d(self.in_channels,
@@ -34,6 +36,10 @@ class AugmentedConv(nn.Module):
 
         self.qkv_conv = nn.Conv2d(self.in_channels, 2 * self.dk + self.dv, kernel_size=1)
 
+        self.att_conv = nn.Sequential(
+                nn.Conv2d(Nh, Nh, 3, stride=1, padding=1),
+                nn.ReLU(inplace=True))
+
         self.attn_out = nn.Conv2d(self.dv, self.dv, 1)
 
         if self.relative:
@@ -43,6 +49,8 @@ class AugmentedConv(nn.Module):
                     torch.randn((2 * self.shape - 1, self.dk // Nh), requires_grad=True))
 
     def forward(self, x):
+        assert isinstance(x, tuple) and len(x) == 2
+        x, prev_att = x[0], x[1]
         # conv_out
         # (batch_size, out_channels, height, width)
         conv_out = self.conv_out(x)
@@ -70,6 +78,15 @@ class AugmentedConv(nn.Module):
             logits += h_rel_logits
             logits += w_rel_logits
 
+        if prev_att is not None:
+            if prev_att.shape[1] == logits.shape[1] \
+                    and prev_att.shape[2] == logits.shape[2] \
+                    and prev_att.shape[3] == logits.shape[3]:
+                att_matrix = (1 - self.beta) * logits + self.beta * prev_att
+                logits = self.att_conv(att_matrix)
+                logits = self.alpha * logits + (1 - self.alpha) * att_matrix
+
+        # N C H W
         weights = F.softmax(logits, dim=-1)
 
         # attn_out
@@ -84,7 +101,7 @@ class AugmentedConv(nn.Module):
         if self.att_downsample:
             attn_out = self.upsample_att(attn_out)
 
-        return torch.cat((conv_out, attn_out), dim=1)
+        return (torch.cat((conv_out, attn_out), dim=1), logits)
 
     def compute_flat_qkv(self, x, dk, dv, Nh):
         N, _, H, W = x.size()
@@ -196,34 +213,37 @@ class BasicBlock(nn.Module):
         return out
 
 
-class AABasicBlock(nn.Module):
+class EABasicBlock(nn.Module):
     expansion = 1
 
     def __init__(self, inplanes, planes, stride=1, downsample=None,
                  shape=None, att_downsample=None):
-        super(AABasicBlock, self).__init__()
-        self.conv1 = AugmentedConv(in_channels=inplanes, out_channels=planes,
-                                   kernel_size=3, shape=shape, stride=stride,
-                                   k=0.25, v=0.25, Nh=8,
-                                   att_downsample=att_downsample)
+        super(EABasicBlock, self).__init__()
+        self.conv1 = EAAugmentedConv(in_channels=inplanes, out_channels=planes,
+                                     kernel_size=3, shape=shape, stride=stride,
+                                     k=0.25, v=0.25, Nh=8,
+                                     att_downsample=att_downsample)
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu = nn.ReLU(inplace=True)
-        self.conv2 = AugmentedConv(in_channels=planes, out_channels=planes,
-                                   kernel_size=3, shape=shape, stride=1,
-                                   k=0.25, v=0.25, Nh=8,
-                                   att_downsample=att_downsample)
+        self.conv2 = EAAugmentedConv(in_channels=planes, out_channels=planes,
+                                     kernel_size=3, shape=shape, stride=1,
+                                     k=0.25, v=0.25, Nh=8,
+                                     att_downsample=att_downsample)
         self.bn2 = nn.BatchNorm2d(planes)
         self.downsample = downsample
         self.stride = stride
 
     def forward(self, x):
+        assert isinstance(x, tuple) and len(x) == 2
+        x, att = x[0], x[1]
+
         identity = x
 
-        out = self.conv1(x)
+        (out, att) = self.conv1((x, att))
         out = self.bn1(out)
         out = self.relu(out)
 
-        out = self.conv2(out)
+        (out, att) = self.conv2((out, att))
         out = self.bn2(out)
 
         if self.downsample is not None:
@@ -232,7 +252,7 @@ class AABasicBlock(nn.Module):
         out += identity
         out = self.relu(out)
 
-        return out
+        return (out, att)
 
 
 class Bottleneck(nn.Module):
@@ -274,18 +294,18 @@ class Bottleneck(nn.Module):
         return out
 
 
-class AABottleneck(nn.Module):
+class EABottleneck(nn.Module):
     expansion = 4
 
     def __init__(self, inplanes, planes, stride=1, downsample=None,
                  shape=None, att_downsample=None):
-        super(AABottleneck, self).__init__()
+        super(EABottleneck, self).__init__()
         self.conv1 = conv1x1(inplanes, planes)
         self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = AugmentedConv(in_channels=planes, out_channels=planes,
-                                   kernel_size=3, shape=shape, stride=stride,
-                                   k=0.25, v=0.125, Nh=8,
-                                   att_downsample=att_downsample)
+        self.conv2 = EAAugmentedConv(in_channels=planes, out_channels=planes,
+                                     kernel_size=3, shape=shape, stride=stride,
+                                     k=0.25, v=0.125, Nh=8,
+                                     att_downsample=att_downsample)
         self.bn2 = nn.BatchNorm2d(planes)
         self.conv3 = conv1x1(planes, planes * self.expansion)
         self.bn3 = nn.BatchNorm2d(planes * self.expansion)
@@ -294,13 +314,16 @@ class AABottleneck(nn.Module):
         self.stride = stride
 
     def forward(self, x):
+        assert isinstance(x, tuple) and len(x) == 2
+        x, att = x[0], x[1]
+
         identity = x
 
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
 
-        out = self.conv2(out)
+        (out, att) = self.conv2((out, att))
         out = self.bn2(out)
         out = self.relu(out)
 
@@ -313,13 +336,13 @@ class AABottleneck(nn.Module):
         out += identity
         out = self.relu(out)
 
-        return out
+        return (out, att)
 
 
-class AAResNet(nn.Module):
+class EAResNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=1000, zero_init_residual=False):
-        super(AAResNet, self).__init__()
+        super(EAResNet, self).__init__()
         self.shape = 224 # original shape is 224
         self.inplanes = 64
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
@@ -347,9 +370,9 @@ class AAResNet(nn.Module):
         # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
         if zero_init_residual:
             for m in self.modules():
-                if isinstance(m, AABottleneck) or isinstance(m, Bottleneck):
+                if isinstance(m, EABottleneck) or isinstance(m, Bottleneck):
                     nn.init.constant_(m.bn3.weight, 0)
-                elif isinstance(m, AABasicBlock) or isinstance(m, BasicBlock):
+                elif isinstance(m, EABasicBlock) or isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
 
     def _make_layer(self, block, planes, blocks, layer_idx, stride=1):
@@ -364,9 +387,9 @@ class AAResNet(nn.Module):
                 shape = self.shape // 2
             self.shape = self.shape // 2
             if block is BasicBlock:
-                block = AABasicBlock
+                block = EABasicBlock
             elif block is Bottleneck:
-                block = AABottleneck
+                block = EABottleneck
 
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
@@ -392,9 +415,9 @@ class AAResNet(nn.Module):
         x = self.maxpool(x)
 
         x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        x, att = self.layer2((x, None))
+        x, att = self.layer3((x, att))
+        x, att = self.layer4((x, att))
 
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
@@ -403,37 +426,37 @@ class AAResNet(nn.Module):
         return x
 
 
-def aa_resnet34(pretrained=False, **kwargs):
+def ea_resnet34(pretrained=False, **kwargs):
     """Constructs a ResNet-34 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
-    model = AAResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
+    model = EAResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
     return model
 
 
-def aa_resnet50(pretrained=False, **kwargs):
+def ea_resnet50(pretrained=False, **kwargs):
     """Constructs a ResNet-50 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
-    model = AAResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
+    model = EAResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
     return model
 
 
-def aa_resnet101(pretrained=False, **kwargs):
+def ea_resnet101(pretrained=False, **kwargs):
     """Constructs a ResNet-101 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
-    model = AAResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
+    model = EAResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
     return model
 
 
-def aa_resnet152(pretrained=False, **kwargs):
+def ea_resnet152(pretrained=False, **kwargs):
     """Constructs a ResNet-152 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
-    model = AAResNet(Bottleneck, [3, 8, 36, 3], **kwargs)
+    model = EAResNet(Bottleneck, [3, 8, 36, 3], **kwargs)
     return model
