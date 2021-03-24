@@ -338,18 +338,18 @@ class AAResNet(nn.Module):
         # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
         if zero_init_residual:
             for m in self.modules():
-                if isinstance(m, AABottleneck):
+                if isinstance(m, AABottleneck) or isinstance(m, Bottleneck):
                     nn.init.constant_(m.bn3.weight, 0)
-                elif isinstance(m, AABasicBlock):
+                elif isinstance(m, AABasicBlock) or isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
 
     def _make_layer(self, block, planes, blocks, layer_idx, stride=1):
         att_downsample = None
         if layer_idx >= 1:
             att_downsample = True if layer_idx == 1 else False
-            if isinstance(block, BasicBlock):
+            if block is BasicBlock:
                 block = AABasicBlock
-            elif isinstance(block, Bottleneck):
+            elif block is Bottleneck:
                 block = AABottleneck
 
         downsample = None
