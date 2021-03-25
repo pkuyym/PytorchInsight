@@ -173,7 +173,7 @@ def main():
 
     flops, params = get_model_complexity_info(model, (224, 224), as_strings=False, print_per_layer_stat=False)
     print('Flops:  %.3f' % (flops / 1e9))
-    print('Params: %.2fM' % (params / 1e6))
+    print('Params: %.6fM' % (params / 1e6))
 
 
     if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
@@ -227,6 +227,7 @@ def main():
 
     # Train and val
     for epoch in range(start_epoch, args.epochs):
+        adjust_learning_rate(optimizer, epoch)
         print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
 
         train_loss, train_acc = train(train_loader, model, criterion, optimizer, epoch, use_cuda)
@@ -265,9 +266,7 @@ def train(train_loader, model, criterion, optimizer, epoch, use_cuda):
 
     bar = Bar('Processing', max=len(train_loader))
     show_step = len(train_loader) // 10
-    steps_per_epoch = len(train_loader)
     for batch_idx, (inputs, targets) in enumerate(train_loader):
-        adjust_learning_rate(optimizer, batch_idx, steps_per_epoch, epoch)
         batch_size = inputs.size(0)
         if batch_size < args.train_batch:
             continue
@@ -378,7 +377,7 @@ def save_checkpoint(state, is_best, checkpoint='checkpoint', filename='checkpoin
     if is_best:
         shutil.copyfile(filepath, os.path.join(checkpoint, 'model_best.pth.tar'))
 
-def adjust_learning_rate(optimizer, step, steps_per_epoch, epoch):
+def adjust_learning_rate(optimizer, epoch):
     global state
 
     def adjust_optimizer():
@@ -386,8 +385,7 @@ def adjust_learning_rate(optimizer, step, steps_per_epoch, epoch):
             param_group['lr'] = state['lr']
 
     if epoch < args.warmup:
-        warmup_steps = steps_per_epoch * args.warmup
-        state['lr'] = args.lr * (epoch * steps_per_epoch + step) / warmup_steps
+        state['lr'] = args.lr * (epoch + 1) / args.warmup
         adjust_optimizer()
 
     elif args.cos: # cosine decay lr schedule (Note: epoch-wise, not batch-wise)
